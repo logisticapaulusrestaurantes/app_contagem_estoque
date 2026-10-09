@@ -432,17 +432,50 @@ li.item { cursor: default; }
 }
 .camera__topo {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: calc(14px + var(--seguro-topo)) 16px 14px; font-weight: 600;
+  padding: calc(12px + var(--seguro-topo)) 16px 12px; font-weight: 600;
 }
 .camera__fechar {
-  width: 44px; height: 44px; border-radius: 50%; border: 0; font-size: 1.2rem;
+  width: 44px; height: 44px; border-radius: 50%; border: 0; font-size: 1.2rem; flex: none;
   background: rgba(255, 255, 255, .18); color: #fff; cursor: pointer;
 }
-.camera__video { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-.camera__video video { width: 100% !important; height: auto !important; max-height: 100%; object-fit: cover; }
-.camera__rodape { padding: 16px 16px calc(20px + var(--seguro-baixo)); text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; }
-.camera__dica { margin: 0; opacity: .8; font-size: .9rem; }
-.camera__lanterna.ativo { background: var(--creme); }
+.camera__area { position: relative; flex: 1; overflow: hidden; min-height: 0; }
+.camera__video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.camera__mascara { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.camera__moldura {
+  position: relative; width: min(86%, 440px); aspect-ratio: 2.3 / 1;
+  border-radius: 14px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .45);
+  outline: 3px solid rgba(255, 255, 255, .9); transition: outline-color .15s;
+}
+.camera__moldura.lido { outline-color: #34d399; }
+.camera__laser {
+  position: absolute; left: 6%; right: 6%; top: 50%; height: 2px;
+  background: #ff3b30; box-shadow: 0 0 10px #ff3b30; animation: laser 1.6s ease-in-out infinite;
+}
+@keyframes laser { 0%, 100% { transform: translateY(-28px); } 50% { transform: translateY(28px); } }
+.camera__foco {
+  position: absolute; width: 70px; height: 70px; margin: -35px 0 0 -35px; pointer-events: none;
+  border: 2px solid #ffd60a; border-radius: 10px;
+}
+.camera__foco.anim { animation: foco .35s ease-out; }
+@keyframes foco { from { transform: scale(1.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.camera__rodape {
+  padding: 12px 16px calc(16px + var(--seguro-baixo)); text-align: center;
+  display: flex; flex-direction: column; gap: 10px; align-items: stretch;
+}
+.camera__zoom { display: flex; align-items: center; gap: 10px; }
+.camera__zoom button {
+  width: 44px; height: 44px; border-radius: 50%; border: 0; flex: none; cursor: pointer;
+  background: rgba(255, 255, 255, .18); color: #fff; font-size: 1.4rem; font-weight: 700;
+}
+.camera__zoom input { flex: 1; min-height: 0; padding: 0; border: 0; background: transparent; accent-color: var(--verde); box-shadow: none !important; }
+.camera__zoom-valor { min-width: 40px; font-variant-numeric: tabular-nums; }
+.camera__dica { margin: 0; opacity: .8; font-size: .85rem; }
+.camera__botoes { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.camera__btn {
+  min-height: 42px; padding: 8px 16px; border-radius: 99px; border: 0; cursor: pointer;
+  background: rgba(255, 255, 255, .18); color: #fff; font-weight: 600;
+}
+.camera__btn.ativo { background: var(--creme); color: var(--texto); }
 
 /* ---------- Login ---------- */
 .login {
@@ -596,8 +629,8 @@ end $$;
 //  Enquanto estiverem vazios, o app roda em MODO DEMONSTRAÇÃO
 //  (dados salvos só neste aparelho, com produtos de exemplo).
 // =============================================================
-const SUPABASE_URL = "";
-const SUPABASE_ANON_KEY = "";
+const SUPABASE_URL = "https://ngtkjijfytetyialfiah.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_eKg3ZCgbcH_O-hhKsfAgUA_c5FauUx0";
 
 const EMPRESA = "Paulu's";
 const DIAS_ALERTA_PADRAO = 7;
@@ -796,29 +829,59 @@ function esconderToast() {
 // ===================== Leitor de código de barras =====================
 // =============================================================
 //  Leitura de código de barras
-//  1) Câmera do celular (html5-qrcode, carregado só quando usado)
-//  2) Leitor físico USB/Bluetooth (funciona como teclado: digita o
-//     código bem rápido e aperta Enter)
+//  1) Câmera do celular — leitor próprio de alta precisão:
+//     • câmera em alta resolução (até 4K, quando o celular permite)
+//     • zoom da câmera (afasta o celular e o código continua grande e nítido)
+//     • foco contínuo + toque na tela para focar
+//     • lê só a área da moldura em resolução total (códigos pequenos)
+//     • decodificador nativo do aparelho (Android) + ZXing-C++ (WebAssembly)
+//  2) Leitor físico USB/Bluetooth (modo teclado: digita e aperta Enter)
 // =============================================================
 
-const LIB_URL = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
-let libPromessa = null;
+const POLYFILL_URL = "https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/es/ponyfill.js/+esm";
+const FORMATOS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "code_93", "itf", "codabar", "qr_code", "data_matrix"];
+const VAREJO = new Set(["ean_13", "ean_8", "upc_a"]); // têm dígito verificador conferível
+const CHAVE_PREF = "estoque-paulus-camera";
 
-function carregarLib() {
-  if (window.Html5Qrcode) return Promise.resolve();
-  if (!libPromessa) {
-    libPromessa = new Promise((res, rej) => {
-      const s = document.createElement("script");
-      s.src = LIB_URL;
-      s.onload = res;
-      s.onerror = () => {
-        libPromessa = null;
-        rej(new Error("Não foi possível carregar o leitor de câmera. Verifique a internet."));
-      };
-      document.head.appendChild(s);
-    });
+let detectorNativo; // undefined = não verificado, null = indisponível
+let polyPromessa = null;
+let polyPronto = null;
+
+function lerPref() {
+  try { return JSON.parse(localStorage.getItem(CHAVE_PREF) || "{}"); } catch { return {}; }
+}
+function salvarPref(p) {
+  try { localStorage.setItem(CHAVE_PREF, JSON.stringify({ ...lerPref(), ...p })); } catch {}
+}
+
+async function obterNativo() {
+  if (detectorNativo !== undefined) return detectorNativo;
+  detectorNativo = null;
+  try {
+    if ("BarcodeDetector" in window) {
+      const sup = await window.BarcodeDetector.getSupportedFormats();
+      if (sup.includes("ean_13")) detectorNativo = new window.BarcodeDetector({ formats: FORMATOS.filter((f) => sup.includes(f)) });
+    }
+  } catch {}
+  return detectorNativo;
+}
+
+function obterPolyfill() {
+  if (!polyPromessa) {
+    polyPromessa = import(POLYFILL_URL)
+      .then((m) => (polyPronto = new m.BarcodeDetector({ formats: FORMATOS })))
+      .catch((e) => { polyPromessa = null; throw e; });
   }
-  return libPromessa;
+  return polyPromessa;
+}
+
+/** Confere o dígito verificador de EAN/UPC (evita leituras erradas). */
+function digitoOk(codigo) {
+  if (!/^\d{8}$|^\d{12,14}$/.test(codigo)) return false;
+  const d = codigo.split("").map(Number);
+  const dv = d.pop();
+  const soma = d.reverse().reduce((s, n, i) => s + n * (i % 2 === 0 ? 3 : 1), 0);
+  return (10 - (soma % 10)) % 10 === dv;
 }
 
 /** Sinal de confirmação: bip curto + vibração. */
@@ -838,90 +901,267 @@ function sinalLeitura() {
   } catch {}
 }
 
+async function abrirStream(deviceId) {
+  const base = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } };
+  const tentativas = [
+    deviceId ? { ...base, deviceId: { exact: deviceId } } : null,
+    { ...base, facingMode: { ideal: "environment" } },
+    { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: { ideal: "environment" } },
+    { facingMode: { ideal: "environment" } },
+    true,
+  ].filter(Boolean);
+  let erro;
+  for (const video of tentativas) {
+    try { return await navigator.mediaDevices.getUserMedia({ video, audio: false }); } catch (e) {
+      erro = e;
+      if (e?.name === "NotAllowedError") break;
+    }
+  }
+  throw erro;
+}
+
+async function camerasTraseiras() {
+  try {
+    const todas = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    const tras = todas.filter((d) => /back|traseira|rear|environment|0, facing back/i.test(d.label));
+    return tras.length ? tras : todas;
+  } catch { return []; }
+}
+
 /**
  * Abre a câmera em tela cheia e resolve com o código lido
  * (ou null se o usuário fechar).
  */
 async function lerComCamera() {
-  const overlay = document.createElement("div");
-  overlay.className = "camera";
-  overlay.innerHTML = `
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(window.isSecureContext ? "Este navegador não permite usar a câmera." : "A câmera só funciona em endereço https:// (ex.: GitHub Pages).");
+  }
+
+  const ov = document.createElement("div");
+  ov.className = "camera";
+  ov.innerHTML = `
     <div class="camera__topo">
-      <span>Aponte para o código de barras</span>
+      <span class="camera__status">Abrindo a câmera…</span>
       <button type="button" class="camera__fechar" aria-label="Fechar câmera">✕</button>
     </div>
-    <div id="camera-video" class="camera__video"></div>
+    <div class="camera__area">
+      <video class="camera__video" playsinline muted autoplay></video>
+      <div class="camera__mascara"><div class="camera__moldura"><span class="camera__laser"></span></div></div>
+      <div class="camera__foco" hidden></div>
+    </div>
     <div class="camera__rodape">
-      <p class="camera__dica">Segure o celular a uns 15 cm do código, com boa luz.</p>
-      <button type="button" class="btn btn--claro camera__lanterna" hidden>🔦 Lanterna</button>
+      <div class="camera__zoom" hidden>
+        <button type="button" data-z="-">−</button>
+        <input type="range" step="0.1" aria-label="Zoom">
+        <button type="button" data-z="+">+</button>
+        <b class="camera__zoom-valor">1x</b>
+      </div>
+      <p class="camera__dica">Encaixe o código na moldura. Produto pequeno? Afaste o celular ~20 cm e aumente o zoom. Toque na imagem para focar.</p>
+      <div class="camera__botoes">
+        <button type="button" class="camera__btn" data-acao="lanterna" hidden>🔦 Lanterna</button>
+        <button type="button" class="camera__btn" data-acao="trocar" hidden>🔄 Trocar câmera</button>
+      </div>
     </div>`;
-  document.body.appendChild(overlay);
+  document.body.appendChild(ov);
   document.body.classList.add("sem-rolagem");
 
-  let leitor = null;
-  let encerrado = false;
+  const video = ov.querySelector("video");
+  const status = ov.querySelector(".camera__status");
+  const canvas = document.createElement("canvas");
+  const ctx2d = canvas.getContext("2d", { willReadFrequently: true });
 
-  const encerrar = async () => {
+  let stream = null, track = null, encerrado = false, ciclo = 0, inicioBusca = 0;
+  let ultimoCodigo = "", ultimoEm = 0, timerFoco = null;
+  let resolver;
+  const resultado = new Promise((r) => (resolver = r));
+
+  const pararStream = () => { stream?.getTracks().forEach((t) => t.stop()); stream = null; track = null; };
+  const encerrar = (valor) => {
     if (encerrado) return;
     encerrado = true;
-    try { if (leitor?.isScanning) await leitor.stop(); } catch {}
-    try { leitor?.clear(); } catch {}
-    overlay.remove();
+    clearTimeout(timerFoco);
+    pararStream();
+    ov.remove();
     document.body.classList.remove("sem-rolagem");
+    resolver(valor);
+  };
+  ov.querySelector(".camera__fechar").onclick = () => encerrar(null);
+
+  // ---------- Câmera ----------
+  async function ligar(deviceId) {
+    pararStream();
+    stream = await abrirStream(deviceId);
+    track = stream.getVideoTracks()[0];
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    await configurarRecursos();
+  }
+
+  async function aplicar(avancado) {
+    try { await track.applyConstraints({ advanced: [avancado] }); return true; } catch { return false; }
+  }
+
+  async function configurarRecursos() {
+    const caps = track.getCapabilities?.() || {};
+    if (caps.focusMode?.includes("continuous")) await aplicar({ focusMode: "continuous" });
+
+    // Zoom
+    const zoomBox = ov.querySelector(".camera__zoom");
+    if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+      const min = caps.zoom.min, max = Math.min(caps.zoom.max, 8);
+      const slider = zoomBox.querySelector("input");
+      const valor = zoomBox.querySelector(".camera__zoom-valor");
+      slider.min = min; slider.max = max; slider.step = caps.zoom.step || 0.1;
+      const setZoom = async (z) => {
+        z = Math.max(min, Math.min(max, Number(z)));
+        slider.value = z;
+        valor.textContent = `${z.toFixed(1).replace(".0", "")}x`;
+        await aplicar({ zoom: z });
+        salvarPref({ zoom: z });
+      };
+      slider.oninput = () => setZoom(slider.value);
+      zoomBox.querySelectorAll("[data-z]").forEach((b) => (b.onclick = () => setZoom(Number(slider.value) + (b.dataset.z === "+" ? 0.5 : -0.5))));
+      zoomBox.hidden = false;
+      await setZoom(lerPref().zoom ?? Math.min(2, max));
+    } else zoomBox.hidden = true;
+
+    // Lanterna
+    const bL = ov.querySelector('[data-acao="lanterna"]');
+    bL.hidden = !caps.torch;
+    let ligada = false;
+    bL.classList.remove("ativo");
+    bL.onclick = async () => { ligada = !ligada; await aplicar({ torch: ligada }); bL.classList.toggle("ativo", ligada); };
+  }
+
+  // Trocar câmera (celulares com várias lentes traseiras)
+  const bT = ov.querySelector('[data-acao="trocar"]');
+  bT.onclick = async () => {
+    const cams = await camerasTraseiras();
+    if (cams.length < 2) return;
+    const atual = track?.getSettings?.().deviceId;
+    const prox = cams[(cams.findIndex((c) => c.deviceId === atual) + 1) % cams.length];
+    status.textContent = "Trocando câmera…";
+    inicioBusca = 0;
+    try { await ligar(prox.deviceId); salvarPref({ deviceId: prox.deviceId, zoom: undefined }); } catch {}
   };
 
-  return new Promise(async (resolve, reject) => {
-    overlay.querySelector(".camera__fechar").onclick = async () => {
-      await encerrar();
-      resolve(null);
-    };
-    try {
-      await carregarLib();
-      const F = window.Html5QrcodeSupportedFormats;
-      leitor = new window.Html5Qrcode("camera-video", {
-        verbose: false,
-        formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      });
-      await leitor.start(
-        { facingMode: "environment" },
-        {
-          fps: 15,
-          qrbox: (w, h) => ({ width: Math.floor(Math.min(w * 0.86, 380)), height: Math.floor(Math.min(h * 0.32, 190)) }),
-        },
-        async (texto) => {
-          if (encerrado) return;
-          sinalLeitura();
-          await encerrar();
-          resolve(texto.trim());
-        },
-        () => {}
-      );
-      // Lanterna (quando o aparelho suporta)
-      try {
-        const caps = leitor.getRunningTrackCameraCapabilities?.();
-        const torch = caps?.torchFeature?.();
-        if (torch?.isSupported()) {
-          const b = overlay.querySelector(".camera__lanterna");
-          b.hidden = false;
-          let ligada = false;
-          b.onclick = async () => {
-            ligada = !ligada;
-            await torch.apply(ligada);
-            b.classList.toggle("ativo", ligada);
-          };
-        }
-      } catch {}
-    } catch (e) {
-      await encerrar();
-      const msg = String(e?.message || e);
-      if (/Permission|NotAllowed/i.test(msg)) reject(new Error("Permissão da câmera negada. Libere o acesso à câmera nas configurações do navegador."));
-      else if (/NotFound|Requested device/i.test(msg)) reject(new Error("Nenhuma câmera encontrada neste aparelho."));
-      else if (!window.isSecureContext) reject(new Error("A câmera só funciona em endereço https:// (ex.: GitHub Pages)."));
-      else reject(new Error(msg));
-    }
+  // Toque para focar
+  ov.querySelector(".camera__area").addEventListener("click", async (e) => {
+    if (!track) return;
+    const caps = track.getCapabilities?.() || {};
+    const r = video.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    const foco = ov.querySelector(".camera__foco");
+    foco.style.left = `${e.clientX - r.left}px`;
+    foco.style.top = `${e.clientY - r.top}px`;
+    foco.hidden = false;
+    foco.classList.remove("anim"); void foco.offsetWidth; foco.classList.add("anim");
+    clearTimeout(timerFoco);
+    const pontos = caps.pointsOfInterest ? { pointsOfInterest: [{ x, y }] } : {};
+    if (caps.focusMode?.includes("single-shot")) await aplicar({ ...pontos, focusMode: "single-shot" });
+    else if (caps.focusMode?.includes("manual") && caps.focusMode?.includes("continuous")) {
+      await aplicar({ focusMode: "manual" });
+      await aplicar({ ...pontos, focusMode: "continuous" });
+    } else if (pontos.pointsOfInterest) await aplicar(pontos);
+    timerFoco = setTimeout(() => {
+      foco.hidden = true;
+      if (caps.focusMode?.includes("continuous")) aplicar({ focusMode: "continuous" });
+    }, 1500);
   });
+
+  // ---------- Recorte da moldura em pixels reais do vídeo ----------
+  function regiaoMoldura(margem = 0.15) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const ev = video.getBoundingClientRect();
+    const mb = ov.querySelector(".camera__moldura").getBoundingClientRect();
+    const esc = Math.max(ev.width / vw, ev.height / vh); // object-fit: cover
+    const offX = (ev.width - vw * esc) / 2, offY = (ev.height - vh * esc) / 2;
+    let x = (mb.left - ev.left - offX) / esc, y = (mb.top - ev.top - offY) / esc;
+    let w = mb.width / esc, h = mb.height / esc;
+    x -= w * margem; y -= h * margem; w *= 1 + 2 * margem; h *= 1 + 2 * margem;
+    x = Math.max(0, x); y = Math.max(0, y);
+    w = Math.min(vw - x, w); h = Math.min(vh - y, h);
+    return { x, y, w, h };
+  }
+
+  function quadro(tipo) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    let { x, y, w, h } = tipo === "inteiro" ? { x: 0, y: 0, w: vw, h: vh } : regiaoMoldura();
+    let fator = 1;
+    if (tipo === "ampliado") { // metade central da moldura, ampliada 2x (códigos bem pequenos)
+      x += w / 4; y += h / 4; w /= 2; h /= 2; fator = 2;
+    }
+    canvas.width = Math.round(w * fator);
+    canvas.height = Math.round(h * fator);
+    ctx2d.imageSmoothingEnabled = true;
+    ctx2d.imageSmoothingQuality = "high";
+    ctx2d.drawImage(video, x, y, w, h, 0, 0, canvas.width, canvas.height);
+    return ctx2d.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  function aceitar(c) {
+    const valor = String(c.rawValue || "").trim();
+    if (!valor) return false;
+    if (VAREJO.has(c.format) && !digitoOk(valor)) return false;
+    const agora = performance.now();
+    // EAN-13, EAN-8 e UPC-A têm dígito verificador conferido: 1 leitura basta.
+    // Outros formatos precisam de 2 leituras iguais seguidas.
+    const confirmado = VAREJO.has(c.format) || (valor === ultimoCodigo && agora - ultimoEm < 1500);
+    ultimoCodigo = valor; ultimoEm = agora;
+    if (!confirmado) return false;
+    ov.querySelector(".camera__moldura").classList.add("lido");
+    sinalLeitura();
+    setTimeout(() => encerrar(valor), 180);
+    return true;
+  }
+
+  // ---------- Laço de leitura ----------
+  async function laco() {
+    const tipos = ["moldura", "moldura", "ampliado", "moldura", "inteiro"];
+    while (!encerrado) {
+      if (!track || video.readyState < 2 || !video.videoWidth) { await esperar(100); continue; }
+      const detectores = [];
+      const nat = await obterNativo();
+      if (nat) detectores.push(nat);
+      // Com leitor nativo, não espera o ZXing baixar: usa os dois assim que estiver pronto
+      const poly = nat ? polyPronto : await obterPolyfill().catch(() => null);
+      if (poly) detectores.push(poly);
+      if (!detectores.length) { status.textContent = "Não foi possível carregar o leitor. Verifique a internet."; await esperar(1500); continue; }
+      if (!inicioBusca) inicioBusca = performance.now();
+      const temZoom = !ov.querySelector(".camera__zoom").hidden;
+      status.textContent = performance.now() - inicioBusca > 5000
+        ? (temZoom ? "Não leu ainda? Afaste um pouco e aumente o zoom (+)" : "Não leu ainda? Afaste um pouco e toque para focar")
+        : "Procurando código…";
+      const tipo = tipos[ciclo % tipos.length];
+      const det = detectores[ciclo % detectores.length];
+      ciclo++;
+      try {
+        const img = quadro(tipo);
+        const achados = await det.detect(img);
+        for (const c of achados) if (aceitar(c)) return;
+      } catch {}
+      await esperar(16);
+    }
+  }
+
+  try {
+    const pref = lerPref();
+    obterPolyfill().catch(() => {}); // começa a baixar o decodificador junto com a câmera
+    await ligar(pref.deviceId);
+    if ((await camerasTraseiras()).length > 1) bT.hidden = false;
+    laco();
+  } catch (e) {
+    encerrar(null);
+    const n = e?.name || "", msg = String(e?.message || e);
+    if (n === "NotAllowedError" || /Permission/i.test(msg)) throw new Error("Permissão da câmera negada. Libere o acesso à câmera nas configurações do navegador.");
+    if (n === "NotFoundError" || n === "OverconstrainedError") throw new Error("Nenhuma câmera encontrada neste aparelho.");
+    if (n === "NotReadableError") throw new Error("A câmera está em uso por outro aplicativo. Feche-o e tente de novo.");
+    throw new Error(msg);
+  }
+  return resultado;
 }
+
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Leitor físico (modo teclado). Captura sequências digitadas muito rápido
@@ -960,7 +1200,7 @@ const db = (() => {
 //  Todas as telas usam só as funções exportadas aqui.
 // =============================================================
 
-const SUPABASE_CDN = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
+const SUPABASE_CDN = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/+esm";
 
 let sb = null;
 let modo = "demo"; // "supabase" | "demo"
