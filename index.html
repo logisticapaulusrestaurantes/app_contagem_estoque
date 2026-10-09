@@ -508,6 +508,12 @@ li.item { cursor: default; }
 .alerta-dias .chips { flex-wrap: nowrap; }
 .alerta-dias .chip { padding: 6px 11px; }
 
+/* iPhone (Safari): data alinhada e sem altura zerada quando vazia */
+input[type="date"]::-webkit-date-and-time-value { text-align: left; min-height: 1.4em; }
+input[type="date"] { display: block; }
+/* Safari amplia a tela ao focar campos com fonte < 16px */
+textarea, .sql-caixa { font-size: 16px; }
+
 .sql-caixa { width: 100%; min-height: 50dvh; font: 12px/1.4 ui-monospace, monospace; border: 1.5px solid var(--cinza); border-radius: 12px; padding: 10px; }
 
   </style>
@@ -885,10 +891,21 @@ function digitoOk(codigo) {
 }
 
 /** Sinal de confirmação: bip curto + vibração. */
-function sinalLeitura() {
-  try { navigator.vibrate?.(80); } catch {}
+// iPhone: o som só funciona se o AudioContext for criado/destravado num toque do usuário.
+const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+let audioCtx = null;
+function prepararSom() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch {}
+}
+
+function sinalLeitura() {
+  try { navigator.vibrate?.(80); } catch {} // (o iPhone não vibra pelo navegador)
+  try {
+    prepararSom();
+    const ctx = audioCtx;
     const o = ctx.createOscillator();
     const g = ctx.createGain();
     o.type = "square";
@@ -897,7 +914,6 @@ function sinalLeitura() {
     o.connect(g).connect(ctx.destination);
     o.start();
     o.stop(ctx.currentTime + 0.09);
-    o.onended = () => ctx.close();
   } catch {}
 }
 
@@ -933,6 +949,7 @@ async function camerasTraseiras() {
  * (ou null se o usuário fechar).
  */
 async function lerComCamera() {
+  prepararSom();
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error(window.isSecureContext ? "Este navegador não permite usar a câmera." : "A câmera só funciona em endereço https:// (ex.: GitHub Pages).");
   }
@@ -970,7 +987,7 @@ async function lerComCamera() {
   const canvas = document.createElement("canvas");
   const ctx2d = canvas.getContext("2d", { willReadFrequently: true });
 
-  let stream = null, track = null, encerrado = false, ciclo = 0, inicioBusca = 0;
+  let stream = null, track = null, encerrado = false, ciclo = 0, inicioBusca = 0, avisoAte = 0;
   let ultimoCodigo = "", ultimoEm = 0, timerFoco = null;
   let resolver;
   const resultado = new Promise((r) => (resolver = r));
@@ -1024,6 +1041,11 @@ async function lerComCamera() {
       zoomBox.hidden = false;
       await setZoom(lerPref().zoom ?? Math.min(2, max));
     } else zoomBox.hidden = true;
+    ov.querySelector(".camera__dica").textContent = !zoomBox.hidden
+      ? "Encaixe o código na moldura. Produto pequeno? Afaste o celular ~20 cm e aumente o zoom. Toque na imagem para focar."
+      : IOS
+        ? "Encaixe o código na moldura, a uns 15–20 cm. Produto pequeno no iPhone Pro? Toque em “Trocar câmera” até a Ultra-Angular, que foca bem de perto."
+        : "Encaixe o código na moldura, a uns 15–20 cm. Toque na imagem para focar.";
 
     // Lanterna
     const bL = ov.querySelector('[data-acao="lanterna"]');
@@ -1042,7 +1064,15 @@ async function lerComCamera() {
     const prox = cams[(cams.findIndex((c) => c.deviceId === atual) + 1) % cams.length];
     status.textContent = "Trocando câmera…";
     inicioBusca = 0;
-    try { await ligar(prox.deviceId); salvarPref({ deviceId: prox.deviceId, zoom: undefined }); } catch {}
+    try {
+      await ligar(prox.deviceId);
+      salvarPref({ deviceId: prox.deviceId, zoom: undefined });
+      avisoAte = performance.now() + 2500;
+      status.textContent = prox.label ? `📷 ${prox.label}` : "Câmera trocada";
+    } catch {
+      status.textContent = "Não foi possível usar essa câmera.";
+      try { await ligar(atual); } catch {}
+    }
   };
 
   // Toque para focar
@@ -1129,9 +1159,13 @@ async function lerComCamera() {
       if (!detectores.length) { status.textContent = "Não foi possível carregar o leitor. Verifique a internet."; await esperar(1500); continue; }
       if (!inicioBusca) inicioBusca = performance.now();
       const temZoom = !ov.querySelector(".camera__zoom").hidden;
-      status.textContent = performance.now() - inicioBusca > 5000
-        ? (temZoom ? "Não leu ainda? Afaste um pouco e aumente o zoom (+)" : "Não leu ainda? Afaste um pouco e toque para focar")
-        : "Procurando código…";
+      if (performance.now() > avisoAte) {
+        status.textContent = performance.now() - inicioBusca > 5000
+          ? (temZoom ? "Não leu ainda? Afaste um pouco e aumente o zoom (+)"
+            : IOS ? "Não leu ainda? Afaste um pouco ou toque em Trocar câmera"
+            : "Não leu ainda? Afaste um pouco e toque para focar")
+          : "Procurando código…";
+      }
       const tipo = tipos[ciclo % tipos.length];
       const det = detectores[ciclo % detectores.length];
       ciclo++;
