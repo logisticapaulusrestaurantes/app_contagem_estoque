@@ -514,6 +514,56 @@ input[type="date"] { display: block; }
 /* Safari amplia a tela ao focar campos com fonte < 16px */
 textarea, .sql-caixa { font-size: 16px; }
 
+/* ---------- Vários códigos de barras ---------- */
+.mais-codigos {
+  display: inline-block; margin-left: 4px; padding: 0 7px; border-radius: 99px;
+  background: var(--creme); color: var(--verde-escuro); font-size: .75rem; font-weight: 700;
+}
+.nao-encontrado { display: flex; flex-direction: column; gap: 12px; }
+.nao-encontrado .aviso { margin-bottom: 0; }
+.nao-encontrado__titulo { font-size: 1.05rem; color: var(--verde-escuro); }
+.seletor { display: flex; flex-direction: column; gap: 8px; }
+.seletor-lista {
+  max-height: 300px; overflow-y: auto; padding: 2px; margin: 0 -2px;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+}
+.folha .seletor-lista { max-height: 50dvh; }
+.parecidos {
+  margin: -4px 0 14px; padding: 12px; border-radius: 12px;
+  background: var(--alerta-fundo); font-size: .92rem;
+}
+.parecidos p { margin: 0 0 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.parecidos p .ic { color: var(--alerta); }
+.parecidos ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.parecidos li { display: flex; align-items: center; gap: 10px; background: #fff; border-radius: 10px; padding: 8px 10px; }
+.parecidos li span { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.parecidos li small { color: var(--suave); }
+.lista-codigos { list-style: none; margin: 4px 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lista-codigos li {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--borda); border-radius: 10px; background: var(--creme-claro);
+}
+.lista-codigos code {
+  flex: 1; min-width: 0; background: none; padding: 0; font-size: 1rem; letter-spacing: .5px;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.lista-codigos .link-acao { font-size: .85rem; padding: 4px 0; }
+.lista-codigos .btn-icone { width: 36px; height: 36px; color: var(--vencido); }
+#fCodigo .btn { width: 50px; padding: 0; flex: none; }
+.banco-desatualizado { margin: 0; }
+.banco-desatualizado .btn { margin-top: 8px; }
+
+/* ---------- Visão por produto (total + validade) ---------- */
+.produto-cab__botoes { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.produto-cab__selo { margin-top: 6px !important; }
+.acoes-produto { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 8px; margin-top: 6px; }
+.acoes-produto .btn { padding: 10px 8px; font-size: .95rem; }
+.contar-rapido { background: var(--creme-claro); border-radius: 12px; padding: 12px; }
+.contar-rapido .campo { margin-bottom: 10px; }
+.form-contagem .contador { margin-bottom: 2px; }
+.form-contagem .campo small { margin-top: 2px; }
+@media (max-width: 360px) { .acoes-produto { grid-template-columns: 1fr 1fr; } .acoes-produto .btn--primario { grid-column: 1 / -1; } }
+
 .sql-caixa { width: 100%; min-height: 50dvh; font: 12px/1.4 ui-monospace, monospace; border: 1.5px solid var(--cinza); border-radius: 12px; padding: 10px; }
 
   </style>
@@ -614,6 +664,95 @@ begin
   begin alter publication supabase_realtime add table public.produtos;  exception when others then null; end;
   begin alter publication supabase_realtime add table public.lotes;     exception when others then null; end;
   begin alter publication supabase_realtime add table public.contagens; exception when others then null; end;
+end $$;
+
+
+-- =============================================================
+--  ATUALIZAÇÃO v2 — vários códigos de barras por produto
+--  + juntar produtos duplicados
+--  Pode rodar mais de uma vez sem problema (não apaga dados).
+-- =============================================================
+
+-- ---------- Códigos de barras do produto ----------
+-- Todos os códigos de um produto (inclusive o principal) ficam aqui.
+-- Cada código só pode pertencer a UM produto.
+create table if not exists public.produto_codigos (
+  id          uuid primary key default gen_random_uuid(),
+  produto_id  uuid not null references public.produtos(id) on delete cascade,
+  codigo      text not null unique,
+  criado_em   timestamptz not null default now()
+);
+create index if not exists produto_codigos_produto_idx on public.produto_codigos (produto_id);
+
+-- Copia os códigos que já existem
+insert into public.produto_codigos (produto_id, codigo)
+select id, codigo_barras from public.produtos
+on conflict (codigo) do nothing;
+
+-- O código principal (produtos.codigo_barras) sempre está na lista
+create or replace function public.tg_codigo_principal()
+returns trigger language plpgsql as $$
+begin
+  insert into public.produto_codigos (produto_id, codigo)
+  values (new.id, new.codigo_barras)
+  on conflict (codigo) do nothing;
+  if not exists (select 1 from public.produto_codigos
+                 where codigo = new.codigo_barras and produto_id = new.id) then
+    raise exception 'Este código de barras já pertence a outro produto.' using errcode = '23505';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists produtos_codigo_principal on public.produtos;
+create trigger produtos_codigo_principal
+  after insert or update of codigo_barras on public.produtos
+  for each row execute function public.tg_codigo_principal();
+
+-- Não deixa apagar o código principal (escolha outro principal antes)
+create or replace function public.tg_protege_principal()
+returns trigger language plpgsql as $$
+begin
+  if exists (select 1 from public.produtos
+             where id = old.produto_id and codigo_barras = old.codigo) then
+    raise exception 'Não é possível remover o código principal. Defina outro código como principal antes.';
+  end if;
+  return old;
+end $$;
+
+drop trigger if exists produto_codigos_protege_principal on public.produto_codigos;
+create trigger produto_codigos_protege_principal
+  before delete on public.produto_codigos
+  for each row execute function public.tg_protege_principal();
+
+-- ---------- Juntar dois produtos (duplicados) ----------
+-- Move lotes, contagens e códigos de "origem" para "destino" e apaga "origem".
+create or replace function public.mesclar_produtos(origem uuid, destino uuid)
+returns void language plpgsql security invoker as $$
+begin
+  if origem = destino then
+    raise exception 'Escolha dois produtos diferentes.';
+  end if;
+  if not exists (select 1 from public.produtos where id = destino) then
+    raise exception 'Produto de destino não encontrado.';
+  end if;
+  update public.lotes           set produto_id = destino where produto_id = origem;
+  update public.contagens       set produto_id = destino where produto_id = origem;
+  update public.produto_codigos set produto_id = destino where produto_id = origem;
+  delete from public.produtos where id = origem;
+end $$;
+
+revoke execute on function public.mesclar_produtos(uuid, uuid) from public, anon;
+grant  execute on function public.mesclar_produtos(uuid, uuid) to authenticated;
+
+-- ---------- Segurança e tempo real ----------
+alter table public.produto_codigos enable row level security;
+drop policy if exists "logados_tudo_produto_codigos" on public.produto_codigos;
+create policy "logados_tudo_produto_codigos" on public.produto_codigos
+  for all to authenticated using (true) with check (true);
+
+do $$
+begin
+  begin alter publication supabase_realtime add table public.produto_codigos; exception when others then null; end;
 end $$;
 
   </script>
@@ -1238,6 +1377,13 @@ const SUPABASE_CDN = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2
 
 let sb = null;
 let modo = "demo"; // "supabase" | "demo"
+let temCodigos = true; // false = banco ainda sem a atualização v2 (vários códigos)
+const MSG_ATUALIZAR = "Para usar vários códigos por produto, rode a atualização do banco (SQL v2) no Supabase.";
+
+/** true quando o Supabase ainda não recebeu a atualização v2 do SQL. */
+function precisaAtualizarBanco() {
+  return modo === "supabase" && !temCodigos;
+}
 
 async function iniciar() {
   const forcarDemo = new URLSearchParams(location.search).has("demo");
@@ -1247,6 +1393,11 @@ async function iniciar() {
       auth: { persistSession: true, autoRefreshToken: true },
     });
     modo = "supabase";
+    // Verifica se a tabela de códigos (atualização v2) já existe
+    try {
+      const { error } = await sb.from("produto_codigos").select("id", { head: true }).limit(1);
+      if (error && (error.code === "42P01" || error.code === "PGRST205" || /produto_codigos/.test(error.message || ""))) temCodigos = false;
+    } catch {}
   } else {
     modo = "demo";
     demo.carregar();
@@ -1262,7 +1413,8 @@ function ok({ data, error }) {
 function traduzErro(e) {
   const m = e?.message || String(e);
   if (/Invalid login credentials/i.test(m)) return "E-mail ou senha incorretos.";
-  if (/duplicate key.*codigo_barras/i.test(m)) return "Já existe um produto com este código de barras.";
+  if (/duplicate key.*codigo|já pertence a outro produto/i.test(m)) return "Este código de barras já pertence a outro produto.";
+  if (/mesclar_produtos|PGRST202/i.test(m)) return MSG_ATUALIZAR;
   if (/Failed to fetch|NetworkError/i.test(m)) return "Sem conexão com a internet.";
   if (/JWT|not authorized|permission denied/i.test(m)) return "Sessão expirada. Entre novamente.";
   return m;
@@ -1291,41 +1443,124 @@ function aoMudarSessao(cb) {
 }
 
 // ---------------- PRODUTOS ----------------
+// Todo produto devolvido tem "codigos": [principal, ...outros]
+function selProduto() {
+  return temCodigos ? "*, produto_codigos(codigo)" : "*";
+}
+function comCodigos(p) {
+  if (!p) return p;
+  const lista = (p.produto_codigos || []).map((c) => c.codigo);
+  const outros = [...new Set(lista)].filter((c) => c !== p.codigo_barras).sort();
+  const { produto_codigos, ...resto } = p;
+  return { ...resto, codigos: [p.codigo_barras, ...outros] };
+}
+function demoComCodigos(p) {
+  if (!p) return p;
+  return comCodigos({ ...p, produto_codigos: demo.codigos.filter((c) => c.produto_id === p.id) });
+}
+
 async function produtoPorCodigo(codigo) {
   codigo = String(codigo).trim();
-  if (modo === "demo") return demo.produtos.find((p) => p.codigo_barras === codigo) ?? null;
-  return ok(await sb.from("produtos").select("*").eq("codigo_barras", codigo).maybeSingle());
+  if (!codigo) return null;
+  if (modo === "demo") {
+    const c = demo.codigos.find((x) => x.codigo === codigo);
+    return demoComCodigos(demo.produtos.find((p) => p.id === c?.produto_id));
+  }
+  if (!temCodigos) {
+    return comCodigos(ok(await sb.from("produtos").select("*").eq("codigo_barras", codigo).maybeSingle()));
+  }
+  const r = ok(await sb.from("produto_codigos").select("produtos(*, produto_codigos(codigo))").eq("codigo", codigo).maybeSingle());
+  return comCodigos(r?.produtos ?? null);
 }
 
 async function produtoPorId(id) {
-  if (modo === "demo") return demo.produtos.find((p) => p.id === id) ?? null;
-  return ok(await sb.from("produtos").select("*").eq("id", id).maybeSingle());
+  if (modo === "demo") return demoComCodigos(demo.produtos.find((p) => p.id === id));
+  return comCodigos(ok(await sb.from("produtos").select(selProduto()).eq("id", id).maybeSingle()));
+}
+
+/** Adiciona mais um código de barras a um produto. */
+async function adicionarCodigo(produto_id, codigo) {
+  codigo = String(codigo).trim();
+  if (!codigo) throw new Error("Informe o código de barras.");
+  if (modo === "demo") {
+    const ja = demo.codigos.find((c) => c.codigo === codigo);
+    if (ja?.produto_id === produto_id) return;
+    if (ja) throw new Error(`Este código já pertence a "${demo.produtos.find((p) => p.id === ja.produto_id)?.nome}".`);
+    demo.codigos.push({ id: uid(), produto_id, codigo, criado_em: agoraISO() });
+    return demo.salvar();
+  }
+  if (!temCodigos) throw new Error(MSG_ATUALIZAR);
+  const ja = ok(await sb.from("produto_codigos").select("produto_id, produtos(nome)").eq("codigo", codigo).maybeSingle());
+  if (ja?.produto_id === produto_id) return;
+  if (ja) throw new Error(`Este código já pertence a "${ja.produtos?.nome}".`);
+  ok(await sb.from("produto_codigos").insert({ produto_id, codigo }));
+}
+
+async function removerCodigo(produto_id, codigo) {
+  if (modo === "demo") {
+    if (demo.produtos.find((p) => p.id === produto_id)?.codigo_barras === codigo) {
+      throw new Error("Não é possível remover o código principal. Defina outro código como principal antes.");
+    }
+    demo.codigos = demo.codigos.filter((c) => !(c.produto_id === produto_id && c.codigo === codigo));
+    return demo.salvar();
+  }
+  if (!temCodigos) throw new Error(MSG_ATUALIZAR);
+  ok(await sb.from("produto_codigos").delete().eq("produto_id", produto_id).eq("codigo", codigo));
+}
+
+/** Define qual código aparece como principal do produto. */
+async function definirPrincipal(produto_id, codigo) {
+  if (modo === "demo") {
+    demo.produtos.find((p) => p.id === produto_id).codigo_barras = codigo;
+    return demo.salvar();
+  }
+  ok(await sb.from("produtos").update({ codigo_barras: codigo }).eq("id", produto_id));
+}
+
+/** Junta dois produtos: lotes, contagens e códigos de "origem" vão para "destino". */
+async function mesclarProdutos(origem, destino) {
+  if (origem === destino) throw new Error("Escolha dois produtos diferentes.");
+  if (modo === "demo") {
+    for (const lista of [demo.lotes, demo.contagens, demo.codigos]) {
+      for (const x of lista) if (x.produto_id === origem) x.produto_id = destino;
+    }
+    demo.produtos = demo.produtos.filter((p) => p.id !== origem);
+    return demo.salvar();
+  }
+  if (!temCodigos) throw new Error(MSG_ATUALIZAR);
+  ok(await sb.rpc("mesclar_produtos", { origem, destino }));
 }
 
 async function salvarProduto(p) {
   const dados = {
-    codigo_barras: String(p.codigo_barras).trim(),
     nome: p.nome.trim(),
     unidade: p.unidade || "un",
     categoria: p.categoria?.trim() || null,
     dias_alerta: Number(p.dias_alerta),
   };
+  // O código só é enviado no cadastro; depois os códigos são geridos na tela do produto.
+  if (!p.id) dados.codigo_barras = String(p.codigo_barras).trim();
   if (modo === "demo") {
-    const dup = demo.produtos.find((x) => x.codigo_barras === dados.codigo_barras && x.id !== p.id);
-    if (dup) throw new Error("Já existe um produto com este código de barras.");
     if (p.id) {
       const atual = demo.produtos.find((x) => x.id === p.id);
       Object.assign(atual, dados, { atualizado_em: agoraISO() });
       demo.salvar();
-      return atual;
+      return demoComCodigos(atual);
     }
+    const dono = demo.codigos.find((c) => c.codigo === dados.codigo_barras);
+    if (dono) throw new Error(`Este código já pertence a "${demo.produtos.find((x) => x.id === dono.produto_id)?.nome}".`);
     const novo = { id: uid(), ativo: true, criado_em: agoraISO(), atualizado_em: agoraISO(), ...dados };
     demo.produtos.push(novo);
+    demo.codigos.push({ id: uid(), produto_id: novo.id, codigo: novo.codigo_barras, criado_em: agoraISO() });
     demo.salvar();
-    return novo;
+    return demoComCodigos(novo);
   }
-  if (p.id) return ok(await sb.from("produtos").update(dados).eq("id", p.id).select().single());
-  return ok(await sb.from("produtos").insert(dados).select().single());
+  if (p.id) return comCodigos(ok(await sb.from("produtos").update(dados).eq("id", p.id).select(selProduto()).single()));
+  if (temCodigos) {
+    const dono = ok(await sb.from("produto_codigos").select("produtos(nome)").eq("codigo", dados.codigo_barras).maybeSingle());
+    if (dono) throw new Error(`Este código já pertence a "${dono.produtos?.nome}".`);
+  }
+  return comCodigos(ok(await sb.from("produtos").insert(dados).select(selProduto()).single()));
 }
 
 async function excluirProduto(id) {
@@ -1333,6 +1568,7 @@ async function excluirProduto(id) {
     demo.produtos = demo.produtos.filter((p) => p.id !== id);
     demo.lotes = demo.lotes.filter((l) => l.produto_id !== id);
     demo.contagens = demo.contagens.filter((c) => c.produto_id !== id);
+    demo.codigos = demo.codigos.filter((c) => c.produto_id !== id);
     return demo.salvar();
   }
   ok(await sb.from("produtos").delete().eq("id", id));
@@ -1341,9 +1577,10 @@ async function excluirProduto(id) {
 /** Produtos com os seus lotes (todos) — usado em Estoque e Início. */
 async function produtosComLotes() {
   if (modo === "demo") {
-    return demo.produtos.map((p) => ({ ...p, lotes: demo.lotes.filter((l) => l.produto_id === p.id) }));
+    return demo.produtos.map((p) => ({ ...demoComCodigos(p), lotes: demo.lotes.filter((l) => l.produto_id === p.id) }));
   }
-  return ok(await sb.from("produtos").select("*, lotes(*)").order("nome"));
+  const lista = ok(await sb.from("produtos").select(`${selProduto()}, lotes(*)`).order("nome"));
+  return lista.map(comCodigos);
 }
 
 // ---------------- LOTES / ENTRADAS ----------------
@@ -1369,11 +1606,12 @@ async function lotesAtivos() {
   if (modo === "demo") {
     return demo.lotes
       .filter((l) => l.quantidade > 0)
-      .map((l) => ({ ...l, produtos: demo.produtos.find((p) => p.id === l.produto_id) }))
+      .map((l) => ({ ...l, produtos: demoComCodigos(demo.produtos.find((p) => p.id === l.produto_id)) }))
       .filter((l) => l.produtos)
       .sort((a, b) => a.validade.localeCompare(b.validade));
   }
-  return ok(await sb.from("lotes").select("*, produtos(*)").gt("quantidade", 0).order("validade"));
+  const lotes = ok(await sb.from("lotes").select(`*, produtos(${selProduto()})`).gt("quantidade", 0).order("validade"));
+  return lotes.map((l) => ({ ...l, produtos: comCodigos(l.produtos) }));
 }
 
 async function lotesDoProduto(produto_id, { incluirZerados = false } = {}) {
@@ -1431,6 +1669,46 @@ async function registrarContagem(lote, quantidade_contada) {
   ok(await sb.from("lotes").update({ quantidade: reg.quantidade_contada }).eq("id", lote.id));
 }
 
+/**
+ * Contagem por PRODUTO (sem controle de lote): grava o total contado e a validade.
+ * O saldo do produto passa a ficar num único registro com essa quantidade e validade.
+ */
+async function registrarContagemProduto(produto_id, quantidade, validade) {
+  quantidade = Number(quantidade);
+  const ativos = await lotesDoProduto(produto_id); // saldo > 0, do que vence primeiro
+  const anterior = ativos.reduce((s, l) => s + Number(l.quantidade), 0);
+  const manter = ativos[0];
+  const zerar = ativos.slice(1).map((l) => l.id);
+  if (!manter && quantidade > 0 && !validade) throw new Error("Informe a validade.");
+
+  if (modo === "demo") {
+    let loteId = manter?.id ?? null;
+    if (manter) {
+      const l = demo.lotes.find((x) => x.id === manter.id);
+      l.quantidade = quantidade;
+      if (validade) l.validade = validade;
+    } else if (quantidade > 0) {
+      loteId = uid();
+      demo.lotes.push({ id: loteId, produto_id, quantidade, quantidade_recebida: quantidade, validade,
+        observacao: "Ajuste de contagem", recebido_em: agoraISO(), recebido_por: "demonstracao@paulus" });
+    }
+    for (const l of demo.lotes) if (zerar.includes(l.id)) l.quantidade = 0;
+    demo.contagens.push({ id: uid(), lote_id: loteId, produto_id, quantidade_anterior: anterior, quantidade_contada: quantidade,
+      contado_em: agoraISO(), contado_por: "demonstracao@paulus" });
+    return demo.salvar();
+  }
+
+  let loteId = manter?.id ?? null;
+  if (manter) {
+    ok(await sb.from("lotes").update(validade ? { quantidade, validade } : { quantidade }).eq("id", manter.id));
+  } else if (quantidade > 0) {
+    loteId = ok(await sb.from("lotes").insert({ produto_id, quantidade, quantidade_recebida: quantidade, validade,
+      observacao: "Ajuste de contagem" }).select("id").single()).id;
+  }
+  if (zerar.length) ok(await sb.from("lotes").update({ quantidade: 0 }).in("id", zerar));
+  ok(await sb.from("contagens").insert({ lote_id: loteId, produto_id, quantidade_anterior: anterior, quantidade_contada: quantidade }));
+}
+
 async function contagensDesde(desdeISO) {
   if (modo === "demo") {
     return demo.contagens
@@ -1475,11 +1753,12 @@ function aoMudarDados(cb) {
     window.addEventListener("storage", (e) => e.key === demo.CHAVE && (demo.carregar(), cb()));
     return;
   }
-  sb.channel("estoque")
+  const canal = sb.channel("estoque")
     .on("postgres_changes", { event: "*", schema: "public", table: "lotes" }, cb)
     .on("postgres_changes", { event: "*", schema: "public", table: "produtos" }, cb)
-    .on("postgres_changes", { event: "*", schema: "public", table: "contagens" }, cb)
-    .subscribe();
+    .on("postgres_changes", { event: "*", schema: "public", table: "contagens" }, cb);
+  if (temCodigos) canal.on("postgres_changes", { event: "*", schema: "public", table: "produto_codigos" }, cb);
+  canal.subscribe();
 }
 
 // ---------------- MODO DEMONSTRAÇÃO ----------------
@@ -1500,10 +1779,18 @@ const demo = {
   produtos: [],
   lotes: [],
   contagens: [],
+  codigos: [],
   carregar() {
     try {
       const salvo = JSON.parse(localStorage.getItem(this.CHAVE) || "null");
-      if (salvo) return Object.assign(this, salvo);
+      if (salvo) {
+        Object.assign(this, salvo);
+        if (!Array.isArray(this.codigos)) { // dados de demonstração antigos
+          this.codigos = this.produtos.map((p) => ({ id: uid(), produto_id: p.id, codigo: p.codigo_barras, criado_em: p.criado_em }));
+          this.salvar();
+        }
+        return;
+      }
     } catch {}
     this.semear();
   },
@@ -1511,7 +1798,7 @@ const demo = {
     try {
       localStorage.setItem(
         this.CHAVE,
-        JSON.stringify({ produtos: this.produtos, lotes: this.lotes, contagens: this.contagens })
+        JSON.stringify({ produtos: this.produtos, lotes: this.lotes, contagens: this.contagens, codigos: this.codigos })
       );
     } catch {}
   },
@@ -1529,10 +1816,15 @@ const demo = {
     this.produtos = [];
     this.lotes = [];
     this.contagens = [];
+    this.codigos = [];
     const ontem = new Date(Date.now() - 864e5).toISOString();
     for (const [codigo, nome, unidade, categoria, dias_alerta, lotes] of base) {
       const p = { id: uid(), codigo_barras: codigo, nome, unidade, categoria, dias_alerta, ativo: true, criado_em: ontem, atualizado_em: ontem };
       this.produtos.push(p);
+      this.codigos.push({ id: uid(), produto_id: p.id, codigo, criado_em: ontem });
+      if (codigo === "7891000100103") { // exemplo: mesmo leite com código da caixa nova
+        this.codigos.push({ id: uid(), produto_id: p.id, codigo: "7891000100110", criado_em: ontem });
+      }
       for (const [q, d] of lotes) {
         this.lotes.push({
           id: uid(), produto_id: p.id, quantidade: q, quantidade_recebida: q, validade: diaMais(d),
@@ -1550,7 +1842,7 @@ function reiniciarDemo() {
 
   return {
     get modo() { return modo; },
-    iniciar, usuarioAtual, entrar, sair, aoMudarSessao, produtoPorCodigo, produtoPorId, salvarProduto, excluirProduto, produtosComLotes, registrarEntrada, lotesAtivos, lotesDoProduto, entradasRecentes, atualizarValidade, excluirLote, registrarContagem, contagensDesde, contagensDoProduto, aoMudarDados, reiniciarDemo,
+    precisaAtualizarBanco, iniciar, usuarioAtual, entrar, sair, aoMudarSessao, produtoPorCodigo, produtoPorId, adicionarCodigo, removerCodigo, definirPrincipal, mesclarProdutos, salvarProduto, excluirProduto, produtosComLotes, registrarEntrada, lotesAtivos, lotesDoProduto, entradasRecentes, atualizarValidade, excluirLote, registrarContagem, registrarContagemProduto, contagensDesde, contagensDoProduto, aoMudarDados, reiniciarDemo,
   };
 })();
 
@@ -1676,6 +1968,7 @@ async function rotear() {
   const r = lerRota();
   rotaAtual = r.nome;
   esconderToast();
+  fecharFolha();
   const destaque = r.nome === "produto" ? "estoque" : r.nome;
   $$(".abas a").forEach((a) => a.classList.toggle("ativa", a.dataset.rota === destaque));
   const alvo = $("#conteudo");
@@ -1788,20 +2081,33 @@ function seloSituacao(s) {
   return `<span class="selo selo--${s.tipo}">${esc(s.texto)}</span>`;
 }
 
-function cartaoProduto(p, lotes, { editar = true } = {}) {
-  const total = lotes.reduce((s, l) => s + Number(l.quantidade), 0);
+/** Estoque do produto sem controle de lote: total e validade mais próxima. */
+function resumoProduto(p, lotes = p.lotes || []) {
+  const ativos = lotes.filter((l) => Number(l.quantidade) > 0).sort((a, b) => a.validade.localeCompare(b.validade));
+  const total = ativos.reduce((s, l) => s + Number(l.quantidade), 0);
+  const validade = ativos[0]?.validade || null;
+  return { ativos, total, validade, sit: validade ? situacao(validade, p.dias_alerta) : null };
+}
+
+function cartaoProduto(p, lotes, { abrir = true } = {}) {
+  const r = resumoProduto(p, lotes);
   return `
     <div class="produto-cab">
       <div class="produto-cab__icone">${icone("caixa")}</div>
       <div class="produto-cab__info">
         <h3>${esc(p.nome)}</h3>
-        <p>${esc(p.codigo_barras)}${p.categoria ? ` · ${esc(p.categoria)}` : ""}</p>
+        <p>${textoCodigos(p)}${p.categoria ? ` · ${esc(p.categoria)}` : ""}</p>
         <p class="produto-cab__meta">
-          <span>Saldo: <strong>${fmtQtd(total)} ${esc(p.unidade)}</strong> em ${lotes.length} ${lotes.length === 1 ? "lote" : "lotes"}</span>
+          <span>Estoque: <strong>${fmtQtd(r.total)} ${esc(p.unidade)}</strong></span>
+          <span>Validade: <strong>${r.validade ? fmtData(r.validade) : "—"}</strong></span>
           <span>Alerta: <strong>${p.dias_alerta} ${p.dias_alerta === 1 ? "dia" : "dias"}</strong> antes</span>
         </p>
+        ${r.sit ? `<p class="produto-cab__selo">${seloSituacao(r.sit)}</p>` : ""}
       </div>
-      ${editar ? `<a class="btn-icone" href="#/produto/${p.id}" aria-label="Abrir produto">${icone("seta")}</a>` : ""}
+      <div class="produto-cab__botoes">
+        <button type="button" class="btn-icone" data-editar-produto="${p.id}" aria-label="Editar produto">${icone("editar")}</button>
+        ${abrir ? `<a class="btn-icone" href="#/produto/${p.id}" aria-label="Abrir produto">${icone("seta")}</a>` : ""}
+      </div>
     </div>`;
 }
 
@@ -1846,6 +2152,81 @@ function validarProduto(form) {
   return null;
 }
 
+// ---------- Busca de produtos (ignora acentos; nome, categoria ou qualquer código) ----------
+function normalizar(s) {
+  return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+function combinaProduto(p, termo) {
+  const t = normalizar(termo);
+  if (!t) return true;
+  const alvo = normalizar(`${p.nome} ${p.categoria || ""}`);
+  return t.split(/\s+/).every((pal) => alvo.includes(pal)) || (p.codigos || [p.codigo_barras]).some((c) => c.includes(String(termo).trim()));
+}
+/** Produtos com nome parecido (evita cadastrar o mesmo produto duas vezes). */
+function parecidos(produtos, nome, max = 3) {
+  const pals = normalizar(nome).split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+  if (!pals.length) return [];
+  const minimo = Math.max(1, Math.ceil(pals.length / 2));
+  return produtos
+    .map((p) => { const alvo = normalizar(p.nome); return { p, n: pals.filter((w) => alvo.includes(w)).length }; })
+    .filter((x) => x.n >= minimo)
+    .sort((a, b) => b.n - a.n)
+    .slice(0, max)
+    .map((x) => x.p);
+}
+function textoCodigos(p) {
+  const extras = (p.codigos?.length || 1) - 1;
+  return `${esc(p.codigo_barras)}${extras > 0 ? ` <span class="mais-codigos">+${extras} ${extras === 1 ? "código" : "códigos"}</span>` : ""}`;
+}
+
+/** Lista pesquisável para escolher um produto já cadastrado. */
+function seletorProduto(raiz, produtos, aoEscolher, { placeholder = "Buscar pelo nome, categoria ou código" } = {}) {
+  raiz.innerHTML = `
+    <label class="busca">${icone("busca")}<input type="search" placeholder="${esc(placeholder)}" aria-label="Buscar produto"></label>
+    <ul class="lista seletor-lista"></ul>`;
+  const input = $("input", raiz);
+  const lista = $(".seletor-lista", raiz);
+  const desenhar = () => {
+    const itens = produtos.filter((p) => combinaProduto(p, input.value)).slice(0, 40);
+    lista.innerHTML = itens.length
+      ? itens.map((p) => `<li><button type="button" class="item" data-escolher="${p.id}">
+          <span class="item__principal"><strong>${esc(p.nome)}</strong><small>${textoCodigos(p)}${p.categoria ? ` · ${esc(p.categoria)}` : ""}</small></span>
+          <span class="item__lado">${icone("seta")}</span></button></li>`).join("")
+      : `<li class="vazio"><p>Nenhum produto encontrado.</p></li>`;
+    $$("[data-escolher]", lista).forEach((b) => (b.onclick = () => aoEscolher(produtos.find((p) => p.id === b.dataset.escolher))));
+  };
+  input.oninput = desenhar;
+  desenhar();
+  return input;
+}
+
+/** Confirma e adiciona o código a um produto existente. Devolve o produto atualizado (ou null). */
+async function vincularCodigo(produto, codigo) {
+  const okV = await confirmar({
+    titulo: "Adicionar este código?",
+    texto: `O código ${codigo} passará a identificar "${produto.nome}". Nas próximas leituras ele já abre este produto.`,
+    botao: "Adicionar código",
+  });
+  if (!okV) return null;
+  try {
+    await db.adicionarCodigo(produto.id, codigo);
+    toast(`Código adicionado a ${produto.nome}.`);
+    return await db.produtoPorId(produto.id);
+  } catch (e) {
+    toast(e.message, "erro");
+    return null;
+  }
+}
+
+/** Copia o SQL do banco (arquivo único: bloco embutido; versão em pastas: supabase/schema.sql). */
+async function copiarSqlBanco() {
+  let sql = document.getElementById("schema-sql")?.textContent?.trim();
+  if (!sql) { try { sql = await (await fetch("supabase/schema.sql")).text(); } catch {} }
+  if (!sql) return toast("Não foi possível obter o SQL.", "erro");
+  try { await navigator.clipboard.writeText(sql); toast("SQL copiado. Cole no SQL Editor do Supabase e clique em Run."); }
+  catch { abrirFolha(`<h2 class="folha__titulo">SQL do banco</h2><textarea class="sql-caixa" readonly>${esc(sql)}</textarea>`, (f) => $("textarea", f).select()); }
+}
+
 /** Busca nome sugerido no Open Food Facts (base pública de produtos). */
 async function sugerirNome(codigo) {
   if (!/^\d{8,14}$/.test(codigo)) return null;
@@ -1871,17 +2252,20 @@ async function sugerirNome(codigo) {
 async function telaInicio(alvo) {
   carregando(alvo);
   const [produtos, recentes] = await Promise.all([db.produtosComLotes(), db.entradasRecentes(5)]);
-  const lotes = [];
-  for (const p of produtos) for (const l of p.lotes) if (Number(l.quantidade) > 0) lotes.push({ ...l, produto: p, sit: situacao(l.validade, p.dias_alerta) });
-  const vencidos = lotes.filter((l) => l.sit.tipo === "vencido");
-  const alerta = lotes.filter((l) => l.sit.tipo === "alerta");
-  const comSaldo = produtos.filter((p) => p.lotes.some((l) => Number(l.quantidade) > 0)).length;
+  const emEstoque = produtos.map((p) => ({ p, r: resumoProduto(p) })).filter((x) => x.r.total > 0);
+  const vencidos = emEstoque.filter((x) => x.r.sit.tipo === "vencido");
+  const alerta = emEstoque.filter((x) => x.r.sit.tipo === "alerta");
+  const comSaldo = emEstoque.length;
   const hoje = hojeStr();
   const entradasHoje = produtos.flatMap((p) => p.lotes).filter((l) => new Date(l.recebido_em).toLocaleDateString("sv-SE") === hoje).length;
-  const atencao = [...vencidos, ...alerta].sort((a, b) => a.sit.dias - b.sit.dias).slice(0, 6);
+  const atencao = [...vencidos, ...alerta].sort((a, b) => a.r.sit.dias - b.r.sit.dias).slice(0, 6);
   const saud = new Date().getHours() < 12 ? "Bom dia" : new Date().getHours() < 18 ? "Boa tarde" : "Boa noite";
 
   alvo.innerHTML = `
+    ${db.precisaAtualizarBanco() ? `<section class="aviso aviso--alerta banco-desatualizado">${icone("alerta")}<div>
+      <strong>Atualize o banco de dados</strong>
+      <p>Para usar vários códigos de barras por produto e juntar produtos duplicados, rode o SQL atualizado no Supabase (SQL Editor → New query → Run).</p>
+      <button type="button" class="btn btn--claro btn--pequeno" id="bCopiarSqlAtualizacao">Copiar SQL</button></div></section>` : ""}
     <section class="saudacao">
       <p>${saud}${usuario?.email ? `, ${esc(usuario.email.split("@")[0])}` : ""}</p>
       <h1>${dataExtenso()}</h1>
@@ -1889,7 +2273,7 @@ async function telaInicio(alvo) {
 
     <section class="indicadores">
       <a href="#/validade?filtro=vencido" class="indicador indicador--vencido">
-        <strong>${vencidos.length}</strong><span>${vencidos.length === 1 ? "lote vencido" : "lotes vencidos"}</span></a>
+        <strong>${vencidos.length}</strong><span>${vencidos.length === 1 ? "produto vencido" : "produtos vencidos"}</span></a>
       <a href="#/validade?filtro=alerta" class="indicador indicador--alerta">
         <strong>${alerta.length}</strong><span>vencendo em breve</span></a>
       <a href="#/estoque" class="indicador">
@@ -1900,13 +2284,13 @@ async function telaInicio(alvo) {
 
     <section class="acoes-rapidas">
       <a href="#/receber" class="acao-rapida acao-rapida--principal">${icone("bipar")}<span><strong>Receber mercadoria</strong><small>Bipar, quantidade e validade</small></span></a>
-      <a href="#/contagem" class="acao-rapida">${icone("contagem")}<span><strong>Fazer contagem</strong><small>Conferir saldo por lote</small></span></a>
+      <a href="#/contagem" class="acao-rapida">${icone("contagem")}<span><strong>Fazer contagem</strong><small>Conferir total e validade</small></span></a>
     </section>
 
     <section class="secao">
       <div class="secao__cab"><h2>Precisa de atenção</h2><a href="#/validade">Ver tudo</a></div>
       ${atencao.length
-        ? `<ul class="lista">${atencao.map(itemLote).join("")}</ul>`
+        ? `<ul class="lista">${atencao.map(({ p, r }) => itemProduto(p, r)).join("")}</ul>`
         : `<div class="vazio">${icone("ok")}<p>Nenhum produto vencido ou perto de vencer.</p></div>`}
     </section>
 
@@ -1921,6 +2305,8 @@ async function telaInicio(alvo) {
             </a></li>`).join("")}</ul>`
         : `<div class="vazio"><p>Nenhuma entrada ainda. Toque em <strong>Receber</strong> para começar.</p></div>`}
     </section>`;
+  const bSql = $("#bCopiarSqlAtualizacao");
+  if (bSql) bSql.onclick = copiarSqlBanco;
 }
 
 function dataExtenso() {
@@ -1940,11 +2326,133 @@ function itemLote(l) {
     </button></li>`;
 }
 
-// Clique em qualquer lote abre os detalhes
+function itemProduto(p, r = resumoProduto(p)) {
+  const s = r.sit;
+  return `
+    <li><button type="button" class="item item--${s ? s.tipo : "zerado"}" data-produto-item="${p.id}">
+      <span class="item__barra"></span>
+      <span class="item__principal"><strong>${esc(p.nome)}</strong>
+        <small>${fmtQtd(r.total)} ${esc(p.unidade)} · validade ${r.validade ? fmtData(r.validade) : "—"}</small></span>
+      <span class="item__lado">${s ? seloSituacao(s) : ""}</span>
+    </button></li>`;
+}
+
+// Cliques globais: editar produto, detalhes do produto, detalhes de uma entrada
 document.addEventListener("click", (e) => {
+  const ed = e.target.closest("[data-editar-produto]");
+  if (ed) { e.preventDefault(); return editarProduto(ed.dataset.editarProduto); }
+  const it = e.target.closest("[data-produto-item]");
+  if (it) return folhaProduto(it.dataset.produtoItem);
   const b = e.target.closest("[data-lote]");
   if (b) folhaLote(b.dataset.lote);
 });
+
+/** Folha rápida do produto: total, validade, contar e editar. */
+async function folhaProduto(id) {
+  const [p, lotes] = await Promise.all([db.produtoPorId(id), db.lotesDoProduto(id)]);
+  if (!p) return toast("Produto não encontrado.", "erro");
+  const r = resumoProduto(p, lotes);
+  abrirFolha(
+    `<h2 class="folha__titulo">${esc(p.nome)}</h2>
+     <div class="detalhes">
+       <div><span>Estoque</span><strong>${fmtQtd(r.total)} ${esc(p.unidade)}</strong></div>
+       <div><span>Validade</span><strong>${r.validade ? fmtData(r.validade) : "—"}</strong></div>
+       <div><span>Situação</span>${r.sit ? seloSituacao(r.sit) : "<strong>Sem estoque</strong>"}</div>
+       <div><span>Alerta</span><strong>${p.dias_alerta} dias antes</strong></div>
+     </div>
+     <form id="fContarRapido" class="contar-rapido" novalidate>
+       <div class="grade-2">
+         <label class="campo"><span>Contagem total (${esc(p.unidade)})</span>
+           <input name="q" inputmode="decimal" placeholder="${fmtQtd(r.total)}" autocomplete="off"></label>
+         <label class="campo"><span>Validade</span>
+           <input name="v" type="date" value="${r.validade || ""}"></label>
+       </div>
+       <p class="erro-form" hidden></p>
+       <button class="btn btn--primario btn--bloco" type="submit">Salvar contagem</button>
+     </form>
+     <div class="acoes-folha">
+       <button type="button" class="btn btn--claro" data-editar-produto="${p.id}">${icone("editar")} Editar produto</button>
+       <a class="btn btn--claro" href="#/produto/${p.id}">Ver produto</a>
+     </div>`,
+    (f) => {
+      const form = $("#fContarRapido", f);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const erro = $(".erro-form", form);
+        const txt = form.q.value.trim();
+        const q = txt === "" ? r.total : lerNumero(txt);
+        if (!(q >= 0)) { erro.textContent = "Informe uma quantidade válida."; erro.hidden = false; return; }
+        if (q > 0 && !form.v.value) { erro.textContent = "Informe a validade."; erro.hidden = false; return; }
+        try {
+          await db.registrarContagemProduto(p.id, q, form.v.value);
+          fecharFolha();
+          toast("Contagem salva.");
+          rotear();
+        } catch (err) { erro.textContent = err.message; erro.hidden = false; }
+      };
+    }
+  );
+}
+
+/** Editar nome, unidade, categoria e alerta do produto (folha). */
+async function editarProduto(id) {
+  const [p, todos] = await Promise.all([db.produtoPorId(id), db.produtosComLotes()]);
+  if (!p) return toast("Produto não encontrado.", "erro");
+  const categorias = [...new Set(todos.map((x) => x.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  abrirFolha(
+    `<h2 class="folha__titulo">${icone("editar")} Editar produto</h2>
+     <form id="fEditar" novalidate>
+       ${camposProduto(p, categorias)}
+       <p class="erro-form" hidden></p>
+       <div class="acoes-folha">
+         <button type="button" class="btn btn--claro" data-fechar>Cancelar</button>
+         <button type="submit" class="btn btn--primario">Salvar</button>
+       </div>
+     </form>
+     <a class="link-acao" href="#/produto/${p.id}">${icone("bipar")} Códigos de barras, juntar duplicado ou excluir ${icone("seta")}</a>`,
+    (f) => {
+      const form = $("#fEditar", f);
+      ligarChipsAlerta(form);
+      $("[data-fechar]", f).onclick = fecharFolha;
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const erro = $(".erro-form", form);
+        const m = validarProduto(form);
+        if (m) { erro.textContent = m; erro.hidden = false; return; }
+        try {
+          const atualizado = await db.salvarProduto({
+            id: p.id, nome: form.nome.value, unidade: form.unidade.value,
+            categoria: form.categoria.value, dias_alerta: lerNumero(form.dias_alerta.value),
+          });
+          fecharFolha();
+          toast("Produto atualizado.");
+          aposEditar(atualizado);
+        } catch (err) { erro.textContent = err.message; erro.hidden = false; }
+      };
+    }
+  );
+}
+
+/** Depois de editar: atualiza a tela sem perder o que já foi digitado. */
+async function aposEditar(p) {
+  const guardar = (form) => Object.fromEntries([...(form?.elements || [])].filter((el) => el.name).map((el) => [el.name, el.value]));
+  const repor = (form, v) => {
+    for (const el of form?.elements || []) {
+      if (!el.name || v[el.name] === undefined) continue;
+      el.value = v[el.name];
+      el.dispatchEvent(new Event("change", { bubbles: true })); // atualiza a prévia da validade
+    }
+  };
+  if (rotaAtual === "receber" && receber.atual?.produto?.id === p.id) {
+    const v = guardar($("#rec-etapa form"));
+    await receber.formulario(p, receber.atual.codigo, false);
+    repor($("#rec-etapa form"), v);
+  } else if (rotaAtual === "contagem" && contagem.atual?.id === p.id) {
+    const v = guardar($("#cont-etapa form"));
+    await contagem.abrirProduto(p);
+    repor($("#cont-etapa form"), v);
+  } else rotear();
+}
 
 async function folhaLote(loteId) {
   const lotes = await db.lotesAtivos();
@@ -2046,20 +2554,46 @@ const receber = {
     carregando(etapa);
     try {
       const p = await db.produtoPorCodigo(codigo);
-      this.formulario(p, codigo, false);
+      if (p) this.formulario(p, codigo, false);
+      else await this.naoEncontrado(codigo);
     } catch (e) {
       toast(e.message, "erro");
       this.mostrarBipar();
     }
   },
 
+  /** Código desconhecido: é um produto que já existe (outro código) ou um produto novo? */
+  async naoEncontrado(codigo) {
+    const etapa = $("#rec-etapa", this.alvo);
+    const produtos = await db.produtosComLotes();
+    if (!produtos.length) return this.formulario(null, codigo, false);
+    etapa.innerHTML = `
+      <section class="cartao nao-encontrado">
+        <div class="aviso aviso--alerta">${icone("alerta")}<div><strong>Código não cadastrado</strong>
+          <p>O código <strong>${esc(codigo)}</strong> ainda não está no sistema.</p></div></div>
+        <h3 class="nao-encontrado__titulo">É um produto que já existe com outro código?</h3>
+        <p class="texto-suave">Toque nele para adicionar este código. Ex.: embalagem nova, outro fornecedor.</p>
+        <div class="seletor"></div>
+        <button type="button" class="btn btn--primario btn--bloco btn--grande" data-acao="novo">${icone("mais")} Não, é um produto novo</button>
+        <button type="button" class="btn btn--claro btn--bloco" data-acao="cancelar">Cancelar</button>
+      </section>`;
+    $('[data-acao="novo"]', etapa).onclick = () => this.formulario(null, codigo, false);
+    $('[data-acao="cancelar"]', etapa).onclick = () => this.mostrarBipar();
+    seletorProduto($(".seletor", etapa), produtos, async (p) => {
+      const atualizado = await vincularCodigo(p, codigo);
+      if (atualizado) this.formulario(atualizado, codigo, false);
+    });
+  },
+
   async formulario(produto, codigo, semCodigo) {
     const etapa = $("#rec-etapa", this.alvo);
     const novo = !produto;
-    const [lotes, categorias] = await Promise.all([
+    this.atual = produto ? { produto, codigo } : null;
+    const [lotes, todos] = await Promise.all([
       produto ? db.lotesDoProduto(produto.id) : [],
-      novo ? categoriasExistentes() : [],
+      novo ? db.produtosComLotes() : [],
     ]);
+    const categorias = [...new Set(todos.map((p) => p.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR"));
     const codigoInterno = semCodigo ? "INT" + Date.now().toString().slice(-9) : codigo;
 
     etapa.innerHTML = `
@@ -2069,6 +2603,7 @@ const receber = {
                <p>${semCodigo ? "Cadastre o produto. Um código interno foi gerado." : `Código <strong>${esc(codigo)}</strong> ainda não cadastrado. Preencha os dados abaixo.`}</p></div></div>
              ${semCodigo ? `<label class="campo"><span>Código interno</span><input name="codigo_barras" value="${esc(codigoInterno)}" required></label>` : ""}
              ${camposProduto({}, categorias)}
+             <div class="parecidos" hidden></div>
              <hr>`
           : cartaoProduto(produto, lotes)}
 
@@ -2102,11 +2637,31 @@ const receber = {
     if (novo) {
       ligarChipsAlerta(form);
       form.unidade.onchange = () => (unSpan.textContent = form.unidade.value);
+      // Avisa se já existe produto com nome parecido
+      const boxParecidos = $(".parecidos", form);
+      const mostrarParecidos = () => {
+        const lista = parecidos(todos, form.nome.value);
+        boxParecidos.hidden = !lista.length;
+        boxParecidos.innerHTML = lista.length
+          ? `<p>${icone("alerta")} <strong>Já existe produto parecido.</strong> É algum destes?</p>
+             <ul>${lista.map((p) => `<li><span><b>${esc(p.nome)}</b><small>${textoCodigos(p)}</small></span>
+               <button type="button" class="btn btn--claro btn--pequeno" data-usar="${p.id}">Usar este</button></li>`).join("")}</ul>`
+          : "";
+        $$("[data-usar]", boxParecidos).forEach((b) => (b.onclick = async () => {
+          const escolhido = todos.find((p) => p.id === b.dataset.usar);
+          if (semCodigo) return this.formulario(await db.produtoPorId(escolhido.id), "", false);
+          const atualizado = await vincularCodigo(escolhido, codigo);
+          if (atualizado) this.formulario(atualizado, codigo, false);
+        }));
+      };
+      let tParecidos;
+      form.nome.addEventListener("input", () => { clearTimeout(tParecidos); tParecidos = setTimeout(mostrarParecidos, 250); });
       if (!semCodigo) {
         form.nome.focus();
         sugerirNome(codigo).then((nome) => {
           if (nome && form.isConnected && !form.nome.value) {
             form.nome.value = nome;
+            mostrarParecidos();
             toast("Nome sugerido pela base de produtos. Confira antes de salvar.", "info");
           }
         });
@@ -2216,7 +2771,7 @@ const contagem = {
   async tela(alvo, params) {
     this.alvo = alvo;
     alvo.innerHTML = `
-      <div class="titulo-tela"><h1>Contagem de estoque</h1><p>Bipe cada produto e informe quanto há de cada lote.</p></div>
+      <div class="titulo-tela"><h1>Contagem de estoque</h1><p>Bipe cada produto e informe a quantidade total e a validade.</p></div>
       <section class="cartao progresso" id="cont-progresso"><div class="carregando"><span class="girador"></span></div></section>
       <div id="cont-etapa"></div>
       <section class="secao" id="cont-faltam"></section>
@@ -2243,16 +2798,26 @@ const contagem = {
     carregando(etapa);
     const p = await db.produtoPorCodigo(codigo);
     if (!p) {
+      const produtos = await db.produtosComLotes();
       etapa.innerHTML = `
-        <section class="cartao">
-          <div class="aviso aviso--alerta">${icone("alerta")}<div><strong>Produto não cadastrado</strong>
-            <p>O código <strong>${esc(codigo)}</strong> não existe no sistema. Cadastre-o registrando a entrada.</p></div></div>
+        <section class="cartao nao-encontrado">
+          <div class="aviso aviso--alerta">${icone("alerta")}<div><strong>Código não cadastrado</strong>
+            <p>O código <strong>${esc(codigo)}</strong> não existe no sistema.</p></div></div>
+          ${produtos.length ? `<h3 class="nao-encontrado__titulo">É um produto que já existe com outro código?</h3>
+          <p class="texto-suave">Toque nele para adicionar este código e fazer a contagem.</p>
+          <div class="seletor"></div>` : ""}
           <div class="acoes-form">
             <button type="button" class="btn btn--claro" data-acao="voltar">Voltar</button>
-            <a class="btn btn--primario" href="#/receber?codigo=${encodeURIComponent(codigo)}">Registrar entrada</a>
+            <a class="btn btn--primario" href="#/receber?codigo=${encodeURIComponent(codigo)}">Produto novo: registrar entrada</a>
           </div>
         </section>`;
       $('[data-acao="voltar"]', etapa).onclick = () => this.mostrarBipar();
+      if (produtos.length) {
+        seletorProduto($(".seletor", etapa), produtos, async (prod) => {
+          const atualizado = await vincularCodigo(prod, codigo);
+          if (atualizado) this.abrirProduto(atualizado);
+        });
+      }
       return;
     }
     this.abrirProduto(p);
@@ -2261,66 +2826,71 @@ const contagem = {
   async abrirProduto(p) {
     const etapa = $("#cont-etapa", this.alvo);
     carregando(etapa);
+    this.atual = p;
     const lotes = await db.lotesDoProduto(p.id);
+    const r = resumoProduto(p, lotes);
     etapa.innerHTML = `
       <form class="cartao form-contagem" novalidate>
         ${cartaoProduto(p, lotes)}
-        ${lotes.length
-          ? `<div class="lotes-contagem">
-              ${lotes.map((l) => {
-                const s = situacao(l.validade, p.dias_alerta);
-                return `<div class="lote-cont lote-cont--${s.tipo}">
-                  <div class="lote-cont__info">
-                    <strong>Validade ${fmtData(l.validade)}</strong>
-                    ${seloSituacao(s)}
-                    <small>Sistema: <b>${fmtQtd(l.quantidade)} ${esc(p.unidade)}</b></small>
-                  </div>
-                  <label class="lote-cont__campo"><span>Contado</span>
-                    <input name="l_${l.id}" data-sistema="${l.quantidade}" inputmode="decimal" placeholder="${fmtQtd(l.quantidade)}" autocomplete="off"></label>
-                </div>`;
-              }).join("")}
-            </div>
-            <button type="button" class="link-acao" data-acao="confere">${icone("ok")} Tudo confere com o sistema</button>`
-          : `<div class="vazio"><p>Este produto não tem lotes com saldo.</p></div>`}
-        <a class="link-acao" href="#/receber?codigo=${encodeURIComponent(p.codigo_barras)}">${icone("mais")} Encontrou um lote com outra validade? Registrar entrada</a>
+        <div class="campo">
+          <span>Quantidade total contada *</span>
+          <div class="contador">
+            <button type="button" class="contador__btn" data-passo="-1" aria-label="Diminuir">${icone("menos")}</button>
+            <input name="quantidade" inputmode="decimal" placeholder="${fmtQtd(r.total)}" aria-label="Quantidade total" autocomplete="off">
+            <span class="contador__un">${esc(p.unidade)}</span>
+            <button type="button" class="contador__btn" data-passo="1" aria-label="Aumentar">${icone("mais")}</button>
+          </div>
+          <small class="texto-suave">No sistema: <b>${fmtQtd(r.total)} ${esc(p.unidade)}</b></small>
+        </div>
+        <button type="button" class="link-acao" data-acao="confere">${icone("ok")} Quantidade confere com o sistema</button>
+        <label class="campo"><span>Validade *</span>
+          <input name="validade" type="date" value="${r.validade || ""}">
+        </label>
+        <p class="previa-validade" aria-live="polite"></p>
         <p class="erro-form" hidden></p>
         <div class="acoes-form">
           <button type="button" class="btn btn--claro" data-acao="voltar">Voltar</button>
-          ${lotes.length ? `<button type="submit" class="btn btn--primario btn--grande">Confirmar contagem</button>` : ""}
+          <button type="submit" class="btn btn--primario btn--grande">Confirmar contagem</button>
         </div>
       </form>`;
     const form = $("form", etapa);
+    const qtd = form.quantidade;
     $('[data-acao="voltar"]', form).onclick = () => this.mostrarBipar();
-    const primeiro = $(".lote-cont input", form);
-    if (primeiro && telaFina) primeiro.focus();
-    const conf = $('[data-acao="confere"]', form);
-    if (conf) conf.onclick = () => $$(".lote-cont input", form).forEach((i) => (i.value = fmtQtd(i.dataset.sistema)));
+    $('[data-acao="confere"]', form).onclick = () => { qtd.value = fmtQtd(r.total); };
+    $$("[data-passo]", form).forEach((b) => (b.onclick = () => {
+      const atual = qtd.value.trim() === "" ? r.total : lerNumero(qtd.value) || 0;
+      qtd.value = fmtQtd(Math.max(0, atual + Number(b.dataset.passo)));
+    }));
+    const previa = $(".previa-validade", form);
+    const atualizarPrevia = () => {
+      previa.innerHTML = form.validade.value ? seloSituacao(situacao(form.validade.value, p.dias_alerta)) : "";
+    };
+    form.validade.oninput = atualizarPrevia;
+    form.validade.onchange = atualizarPrevia;
+    atualizarPrevia();
+    if (telaFina) qtd.focus();
 
     form.onsubmit = async (e) => {
       e.preventDefault();
       const erro = $(".erro-form", form);
+      const falhar = (m) => { erro.textContent = m; erro.hidden = false; };
       erro.hidden = true;
-      const registros = [];
-      for (const l of lotes) {
-        const v = form[`l_${l.id}`].value;
-        if (v.trim() === "") continue;
-        const q = lerNumero(v);
-        if (!(q >= 0)) { erro.textContent = "Há uma quantidade inválida."; erro.hidden = false; return; }
-        registros.push([l, q]);
-      }
-      if (!registros.length) { erro.textContent = "Preencha a quantidade contada de pelo menos um lote."; erro.hidden = false; return; }
+      if (qtd.value.trim() === "") return falhar("Informe a quantidade total contada (ou toque em “confere”).");
+      const q = lerNumero(qtd.value);
+      if (!(q >= 0)) return falhar("Quantidade inválida.");
+      if (q > 0 && !form.validade.value) return falhar("Informe a validade.");
       const btn = $('[type="submit"]', form);
       btn.disabled = true;
       btn.textContent = "Salvando…";
       try {
-        for (const [l, q] of registros) await db.registrarContagem(l, q);
-        const difs = registros.filter(([l, q]) => Number(l.quantidade) !== q).length;
-        toast(difs ? `Contagem salva — ${difs} ${difs === 1 ? "lote ajustado" : "lotes ajustados"}.` : "Contagem salva — tudo confere!");
+        await db.registrarContagemProduto(p.id, q, form.validade.value);
+        const dif = q - r.total;
+        toast(dif === 0 ? "Contagem salva — tudo confere!" : `Contagem salva — ajustado de ${fmtQtd(r.total)} para ${fmtQtd(q)} ${p.unidade}.`);
+        this.atual = null;
         this.mostrarBipar();
         this.atualizarResumo();
       } catch (err) {
-        erro.textContent = err.message;
-        erro.hidden = false;
+        falhar(err.message);
         btn.disabled = false;
         btn.textContent = "Confirmar contagem";
       }
@@ -2378,14 +2948,17 @@ const contagem = {
 // =============================================================
 async function telaValidade(alvo, params) {
   carregando(alvo);
-  const lotes = (await db.lotesAtivos()).map((l) => ({ ...l, sit: situacao(l.validade, l.produtos.dias_alerta) }));
-  const cont = { todos: lotes.length, vencido: 0, alerta: 0, ok: 0 };
-  lotes.forEach((l) => cont[l.sit.tipo]++);
+  const itens = (await db.produtosComLotes())
+    .map((p) => ({ p, r: resumoProduto(p) }))
+    .filter((x) => x.r.total > 0)
+    .sort((a, b) => a.r.validade.localeCompare(b.r.validade));
+  const cont = { todos: itens.length, vencido: 0, alerta: 0, ok: 0 };
+  itens.forEach((x) => cont[x.r.sit.tipo]++);
   let filtro = params.get("filtro") || "todos";
   let busca = "";
 
   alvo.innerHTML = `
-    <div class="titulo-tela"><h1>Validade</h1><p>Lotes em estoque, do que vence primeiro ao último.</p></div>
+    <div class="titulo-tela"><h1>Validade</h1><p>Produtos em estoque, do que vence primeiro ao último.</p></div>
     <div class="chips chips--rolagem" role="tablist">
       ${[["todos", "Todos"], ["vencido", "Vencidos"], ["alerta", "Vencendo"], ["ok", "No prazo"]]
         .map(([k, t]) => `<button type="button" class="chip chip--${k}" data-filtro="${k}" role="tab">${t} <b>${cont[k]}</b></button>`).join("")}
@@ -2396,14 +2969,10 @@ async function telaValidade(alvo, params) {
   const lista = $("#lista-validade");
   const desenhar = () => {
     $$("[data-filtro]").forEach((c) => c.classList.toggle("ativo", c.dataset.filtro === filtro));
-    const termo = busca.toLowerCase();
-    const itens = lotes.filter((l) =>
-      (filtro === "todos" || l.sit.tipo === filtro) &&
-      (!termo || l.produtos.nome.toLowerCase().includes(termo) || l.produtos.codigo_barras.includes(termo))
-    );
-    lista.innerHTML = itens.length
-      ? itens.map(itemLote).join("")
-      : `<li class="vazio">${icone("ok")}<p>${filtro === "vencido" ? "Nenhum lote vencido." : filtro === "alerta" ? "Nada vencendo em breve." : "Nenhum lote encontrado."}</p></li>`;
+    const visiveis = itens.filter(({ p, r }) => (filtro === "todos" || r.sit.tipo === filtro) && combinaProduto(p, busca));
+    lista.innerHTML = visiveis.length
+      ? visiveis.map(({ p, r }) => itemProduto(p, r)).join("")
+      : `<li class="vazio">${icone("ok")}<p>${filtro === "vencido" ? "Nenhum produto vencido." : filtro === "alerta" ? "Nada vencendo em breve." : "Nenhum produto encontrado."}</p></li>`;
   };
   $$("[data-filtro]").forEach((c) => (c.onclick = () => { filtro = c.dataset.filtro; desenhar(); }));
   $(".busca input").oninput = (e) => { busca = e.target.value.trim(); desenhar(); };
@@ -2441,15 +3010,15 @@ async function telaEstoque(alvo) {
     const t = busca.toLowerCase();
     const itens = linhas.filter(({ p, total }) =>
       (mostrarZerados || total > 0) &&
-      (!t || p.nome.toLowerCase().includes(t) || p.codigo_barras.includes(t) || (p.categoria || "").toLowerCase().includes(t))
+      combinaProduto(p, t)
     );
     lista.innerHTML = itens.length
       ? itens.map(({ p, ativos, total, pior }) => `
         <li><a class="item ${pior ? `item--${pior.tipo}` : "item--zerado"}" href="#/produto/${p.id}">
           <span class="item__barra"></span>
           <span class="item__principal"><strong>${esc(p.nome)}</strong>
-            <small>${esc(p.categoria || "Sem categoria")} · ${ativos.length ? `próx. validade ${fmtData(ativos[0].validade)}` : "sem saldo"}</small></span>
-          <span class="item__lado item__qtd"><b>${fmtQtd(total)}</b><small>${esc(p.unidade)}${ativos.length > 1 ? ` · ${ativos.length} lotes` : ""}</small></span>
+            <small>${esc(p.categoria || "Sem categoria")} · ${ativos.length ? `validade ${fmtData(ativos[0].validade)}` : "sem saldo"}</small></span>
+          <span class="item__lado item__qtd"><b>${fmtQtd(total)}</b><small>${esc(p.unidade)}</small></span>
         </a></li>`).join("")
       : `<li class="vazio"><p>${linhas.length ? "Nenhum produto encontrado." : "Nenhum produto cadastrado ainda. Faça a primeira entrada!"}</p></li>`;
   };
@@ -2460,13 +3029,12 @@ async function telaEstoque(alvo) {
 }
 
 function exportarCsv(linhas) {
-  const cab = ["Produto", "Código de barras", "Categoria", "Unidade", "Validade", "Quantidade", "Situação", "Alerta (dias)", "Recebido em"];
+  const cab = ["Produto", "Código de barras", "Outros códigos", "Categoria", "Unidade", "Quantidade total", "Validade", "Situação", "Alerta (dias)"];
   const rows = [cab];
-  for (const { p, ativos } of linhas) {
-    for (const l of ativos) {
-      const s = situacao(l.validade, p.dias_alerta);
-      rows.push([p.nome, p.codigo_barras, p.categoria || "", p.unidade, fmtData(l.validade), fmtQtd(l.quantidade), s.texto, p.dias_alerta, new Date(l.recebido_em).toLocaleDateString("pt-BR")]);
-    }
+  for (const { p, ativos, total } of linhas) {
+    if (!total) continue;
+    const s = situacao(ativos[0].validade, p.dias_alerta);
+    rows.push([p.nome, p.codigo_barras, (p.codigos || []).slice(1).join(" "), p.categoria || "", p.unidade, fmtQtd(total), fmtData(ativos[0].validade), s.texto, p.dias_alerta]);
   }
   const csv = "﻿" + rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(";")).join("\r\n");
   const a = document.createElement("a");
@@ -2487,31 +3055,42 @@ async function telaProduto(alvo, id) {
     alvo.innerHTML = `<div class="vazio"><p>Produto não encontrado.</p><a class="btn btn--claro" href="#/estoque">Voltar ao estoque</a></div>`;
     return;
   }
-  const [lotes, historico, categorias] = await Promise.all([db.lotesDoProduto(p.id), db.contagensDoProduto(p.id), categoriasExistentes()]);
+  const [lotes, historico] = await Promise.all([db.lotesDoProduto(p.id), db.contagensDoProduto(p.id)]);
 
   alvo.innerHTML = `
     <a href="#/estoque" class="voltar">${icone("voltar")} Estoque</a>
-    <section class="cartao">${cartaoProduto(p, lotes, { editar: false })}
-      <div class="acoes-form">
+    <section class="cartao">${cartaoProduto(p, lotes, { abrir: false })}
+      <div class="acoes-produto">
         <a class="btn btn--claro" href="#/contagem?produto=${p.id}">${icone("contagem")} Contar</a>
+        <button type="button" class="btn btn--claro" data-editar-produto="${p.id}">${icone("editar")} Editar</button>
         <a class="btn btn--primario" href="#/receber?codigo=${encodeURIComponent(p.codigo_barras)}">${icone("mais")} Entrada</a>
       </div>
     </section>
 
-    <section class="secao">
-      <div class="secao__cab"><h2>Lotes em estoque</h2></div>
-      ${lotes.length ? `<ul class="lista">${lotes.map((l) => itemLote({ ...l, produto: p })).join("")}</ul>` : `<div class="vazio"><p>Sem saldo no momento.</p></div>`}
-    </section>
+    ${lotes.length > 1 ? `<details class="secao dobra cartao">
+      <summary><h2>Validades no estoque</h2><small>${lotes.length}</small></summary>
+      <p class="texto-suave">Entradas com datas diferentes. A contagem junta tudo em um total com uma validade.</p>
+      <ul class="lista">${lotes.map((l) => itemLote({ ...l, produto: p })).join("")}</ul>
+    </details>` : ""}
 
-    <details class="secao dobra cartao">
-      <summary><h2>${icone("editar")} Editar produto e alerta</h2></summary>
-      <form id="fProd" novalidate>
-        <label class="campo"><span>Código de barras *</span><input name="codigo_barras" required value="${esc(p.codigo_barras)}"></label>
-        ${camposProduto(p, categorias)}
-        <p class="erro-form" hidden></p>
-        <button class="btn btn--primario btn--bloco" type="submit">Salvar alterações</button>
+    <section class="cartao secao" id="sec-codigos">
+      <div class="secao__cab"><h2>${icone("bipar")} Códigos de barras</h2><small>${p.codigos.length}</small></div>
+      <p class="texto-suave">Adicione outros códigos do mesmo produto (embalagem nova, outro fornecedor, caixa fechada…).</p>
+      <ul class="lista-codigos">
+        ${p.codigos.map((c) => `<li>
+          <code>${esc(c)}</code>
+          ${c === p.codigo_barras
+            ? `<span class="selo selo--ok">Principal</span>`
+            : `<button type="button" class="link-acao" data-principal="${esc(c)}">Tornar principal</button>
+               <button type="button" class="btn-icone" data-remover="${esc(c)}" aria-label="Remover código ${esc(c)}">${icone("lixo")}</button>`}
+        </li>`).join("")}
+      </ul>
+      <form class="linha-codigo" id="fCodigo" autocomplete="off">
+        <input name="codigo" inputmode="numeric" enterkeyhint="done" placeholder="Bipe ou digite outro código" aria-label="Novo código de barras">
+        <button type="button" class="btn btn--claro" data-acao="camera-codigo" aria-label="Bipar com a câmera">${icone("camera")}</button>
+        <button type="submit" class="btn btn--primario" aria-label="Adicionar código">${icone("mais")}</button>
       </form>
-    </details>
+    </section>
 
     <section class="secao">
       <div class="secao__cab"><h2>Histórico de contagens</h2></div>
@@ -2520,34 +3099,67 @@ async function telaProduto(alvo, id) {
             const dif = Number(c.quantidade_contada) - Number(c.quantidade_anterior);
             const cls = dif === 0 ? "igual" : dif > 0 ? "sobra" : "falta";
             return `<li class="item"><span class="item__principal"><strong>${fmtDataHora(c.contado_em)}</strong>
-              <small>${c.lotes?.validade ? `lote ${fmtData(c.lotes.validade)} · ` : ""}${esc(c.contado_por || "")}</small></span>
+              <small>${c.lotes?.validade ? `validade ${fmtData(c.lotes.validade)} · ` : ""}${esc(c.contado_por || "")}</small></span>
               <span class="item__lado diferenca diferenca--${cls}"><small>${fmtQtd(c.quantidade_anterior)} → <b>${fmtQtd(c.quantidade_contada)}</b></small>
               <em>${dif === 0 ? "confere" : (dif > 0 ? "+" : "") + fmtQtd(dif)}</em></span></li>`;
           }).join("")}</ul>`
         : `<div class="vazio"><p>Nenhuma contagem registrada.</p></div>`}
     </section>
 
+    <button type="button" class="btn btn--claro btn--bloco" id="bJuntar">${icone("caixa")} Produto duplicado? Juntar com outro</button>
     <button type="button" class="btn btn--perigo-texto btn--bloco" id="bExcluirProd">${icone("lixo")} Excluir produto</button>`;
 
-  const form = $("#fProd");
-  ligarChipsAlerta(form);
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const erro = $(".erro-form", form);
-    const m = validarProduto(form) || (!form.codigo_barras.value.trim() && "Informe o código.");
-    if (m) { erro.textContent = m; erro.hidden = false; return; }
+  // Códigos de barras
+  const fCod = $("#fCodigo");
+  const adicionar = async (codigo) => {
+    codigo = String(codigo || "").trim();
+    if (!codigo) return toast("Bipe ou digite o código.", "erro");
     try {
-      await db.salvarProduto({
-        id: p.id, codigo_barras: form.codigo_barras.value, nome: form.nome.value,
-        unidade: form.unidade.value, categoria: form.categoria.value, dias_alerta: lerNumero(form.dias_alerta.value),
-      });
-      toast("Produto atualizado.");
+      await db.adicionarCodigo(p.id, codigo);
+      toast("Código adicionado.");
       rotear();
-    } catch (err) {
-      erro.textContent = err.message;
-      erro.hidden = false;
-    }
+    } catch (err) { toast(err.message, "erro"); }
   };
+  fCod.onsubmit = (e) => { e.preventDefault(); adicionar(fCod.codigo.value); };
+  $('[data-acao="camera-codigo"]', fCod).onclick = async () => {
+    try { const c = await lerComCamera(); if (c) adicionar(c); } catch (err) { toast(err.message, "erro"); }
+  };
+  $$("[data-principal]").forEach((b) => (b.onclick = async () => {
+    try { await db.definirPrincipal(p.id, b.dataset.principal); toast("Código principal alterado."); rotear(); }
+    catch (err) { toast(err.message, "erro"); }
+  }));
+  $$("[data-remover]").forEach((b) => (b.onclick = async () => {
+    const okR = await confirmar({ titulo: "Remover código?", texto: `O código ${b.dataset.remover} deixará de abrir "${p.nome}".`, botao: "Remover", perigo: true });
+    if (!okR) return;
+    try { await db.removerCodigo(p.id, b.dataset.remover); toast("Código removido."); rotear(); }
+    catch (err) { toast(err.message, "erro"); }
+  }));
+
+  // Juntar produtos duplicados
+  $("#bJuntar").onclick = async () => {
+    const outros = (await db.produtosComLotes()).filter((x) => x.id !== p.id);
+    if (!outros.length) return toast("Não há outro produto para juntar.", "info");
+    abrirFolha(
+      `<h2 class="folha__titulo">Juntar produtos</h2>
+       <p class="texto-suave">Escolha o produto que vai <strong>ficar</strong>. Os lotes, contagens e códigos de <strong>${esc(p.nome)}</strong> passam para ele, e ${esc(p.nome)} é apagado.</p>
+       <div class="seletor"></div>`,
+      (f) => seletorProduto($(".seletor", f), outros, async (destino) => {
+        fecharFolha();
+        const okJ = await confirmar({
+          titulo: "Juntar produtos?",
+          texto: `"${p.nome}" será juntado em "${destino.nome}". Tudo passa para "${destino.nome}" (nome e alerta dele são mantidos). Não dá para desfazer.`,
+          botao: "Juntar", perigo: true,
+        });
+        if (!okJ) return;
+        try {
+          await db.mesclarProdutos(p.id, destino.id);
+          toast(`Produtos juntados em ${destino.nome}.`);
+          location.hash = `#/produto/${destino.id}`;
+        } catch (err) { toast(err.message, "erro"); }
+      })
+    );
+  };
+
   $("#bExcluirProd").onclick = async () => {
     const okEx = await confirmar({ titulo: `Excluir ${p.nome}?`, texto: "O produto, todos os lotes e o histórico de contagens serão apagados. Esta ação não pode ser desfeita.", botao: "Excluir produto", perigo: true });
     if (!okEx) return;
